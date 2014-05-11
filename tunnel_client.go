@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"code.google.com/p/go-uuid/uuid"
-	"encoding/json"
 	"errors"
 	zmq "github.com/pebbe/zmq4"
 	"log"
@@ -18,7 +17,6 @@ type request struct {
 }
 
 type TunnelClient struct {
-	remote     string
 	socket     *zmq.Socket
 	requestMap map[string]chan *http.Response
 	reqChan    chan interface{}
@@ -26,42 +24,27 @@ type TunnelClient struct {
 }
 
 func NewTunnelClient(remote string) (*TunnelClient, error) {
+	//TODO: panic if failed
 	socket, _ := zmq.NewSocket(zmq.DEALER)
 	socket.Connect(remote)
-	return &TunnelClient{remote, socket,
+	return &TunnelClient{
+		socket,
 		make(map[string]chan *http.Response),
 		make(chan interface{}),
 		makeCache()}, nil
 }
 
-func (c *TunnelClient) Do(r *http.Request) (*http.Response, error) {
-	reqId := uuid.New()
+// implement http.RoundTrip interface
+// send http request via the tunnel
+func (c *TunnelClient) RoundTrip(r *http.Request) (*http.Response, error) {
+	reqId := string([]byte(uuid.NewUUID()))
 	respChan := make(chan *http.Response)
 	c.requestMap[reqId] = respChan
 	c.reqChan <- &request{reqId, r}
+	//TODO: add timeout , check RFC for status code about proxy timeout
 	resp := <-respChan
 	delete(c.requestMap, reqId)
 	return resp, nil
-}
-
-func (c *TunnelClient) handleRequest(r *request) error {
-	var buff bytes.Buffer
-	r.request.WriteProxy(&buff)
-	c.socket.Send(r.id, zmq.SNDMORE)
-	c.socket.Send("", zmq.SNDMORE)
-
-	cacheKey := makeCacheKey(r.request)
-	rh := RequestHeader{REQ_HTTP_GET, cacheKey, ""}
-
-	if cacheItem, ok := c.cache.Get(cacheKey); ok {
-		rh.Version = cacheItem.Version
-	}
-
-	rhBytes, _ := json.Marshal(&rh)
-	log.Print("send req header ", string(rhBytes))
-	c.socket.SendBytes(rhBytes, zmq.SNDMORE) //local cache version
-	c.socket.SendBytes(buff.Bytes(), 0)      //send actuall request
-	return nil
 }
 
 func (c *TunnelClient) Run() error {
@@ -73,7 +56,28 @@ func (c *TunnelClient) Run() error {
 }
 
 func (c *TunnelClient) onNewRequest(req interface{}) error {
-	return c.handleRequest(req.(*request))
+	r := req.(*request)
+	var buff bytes.Buffer
+	r.request.WriteProxy(&buff)
+
+	cacheKey := makeCacheKey(r.request)
+	rh := RequestHeader{Action: REQ_HTTP_GET, CacheKey: cacheKey}
+
+	if cacheItem, ok := c.cache.Get(cacheKey); ok {
+		rh.Version = cacheItem.Version
+	}
+
+	header, _ := MarshalBinary(&rh)
+	body := buff.Bytes()
+
+	log.Print("send req header ", string(header))
+
+	c.socket.Send(r.id, zmq.SNDMORE)
+	c.socket.Send("", zmq.SNDMORE)
+	c.socket.SendBytes(header, zmq.SNDMORE) //local cache version
+	c.socket.SendBytes(body, 0)             //send actuall request
+
+	return nil
 }
 
 func (c *TunnelClient) onNewResponse(state zmq.State) (err error) {
@@ -88,7 +92,7 @@ func (c *TunnelClient) onNewResponse(state zmq.State) (err error) {
 	//msgs[1] zero size
 
 	var ph ResponseHeader
-	json.Unmarshal([]byte(msgs[2]), &ph)
+	_ = UnmarshalBinary(&ph, []byte(msgs[2]))
 
 	log.Print("recv resp header ", msgs[2])
 	log.Print("recv resp body length ", len(msgs[3]))
@@ -96,7 +100,7 @@ func (c *TunnelClient) onNewResponse(state zmq.State) (err error) {
 	respBytes := []byte(msgs[3])
 	if ph.Action == RESP_DIFF && ph.IsPatch {
 		cacheItem, ok := c.cache.Get(ph.CacheKey)
-		if ok && cacheItem.Version == ph.PatchTo {
+		if ok && bytes.Equal(cacheItem.Version, ph.PatchTo) {
 			respBytes = Patch(cacheItem.Value, respBytes)
 		}
 	}

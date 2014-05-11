@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"code.google.com/p/go-uuid/uuid"
-	"encoding/json"
 	"errors"
 	zmq "github.com/pebbe/zmq4"
 	"log"
@@ -17,6 +15,7 @@ type response struct {
 	reqId     string
 	reqHeader *RequestHeader
 	resp      *http.Response
+	err       error
 }
 
 type TunnelServer struct {
@@ -43,43 +42,69 @@ func (s *TunnelServer) Run() error {
 	return nil
 }
 
+func (s *TunnelServer) send(envelope []string, header []byte, body []byte) (err error) {
+	for _, item := range envelope {
+		s.socket.Send(item, zmq.SNDMORE)
+	}
+	log.Print("send resp header ", string(header))
+	s.socket.SendBytes(header, zmq.SNDMORE)
+	s.socket.SendBytes(body, 0)
+
+	return nil
+}
+
 func (s *TunnelServer) onNewResponse(item interface{}) (err error) {
 	r := item.(*response)
 
-	s.socket.Send(r.connId, zmq.SNDMORE)
-	s.socket.Send(r.reqId, zmq.SNDMORE)
-	s.socket.Send("", zmq.SNDMORE)
+	envelope := []string{
+		r.connId,
+		r.reqId,
+		"",
+	}
+
+	var header []byte
+	var body []byte
+
+	rh := r.reqHeader
+	if r.err != nil {
+		ph := ResponseHeader{Action: RESP_ERROR}
+		header, _ = MarshalBinary(&ph)
+		s.send(envelope, header, []byte(r.err.Error()))
+		return nil
+	}
 
 	var buff bytes.Buffer
 	r.resp.Write(&buff)
 
-	rh := r.reqHeader
-	nk := uuid.New()
-	var ph ResponseHeader
+	nk := s.cache.GenVersion(rh.CacheKey)
+	ph := ResponseHeader{CacheKey: rh.CacheKey, Version: nk}
 
 	//check for cache , if possible make diff, and send back diff
 	cacheItem, ok := s.cache.Get(rh.CacheKey)
-	if ok && (cacheItem.Version == rh.Version) {
+	if ok {
+		log.Printf("Hit Cache : %s , %s,  %s", rh.CacheKey, rh.Version, cacheItem.Version)
+	}
+	if ok && bytes.Equal(cacheItem.Version, rh.Version) {
 		log.Printf("Hit Cache : %s , %s", rh.CacheKey, rh.Version)
-		ph = ResponseHeader{RESP_DIFF, rh.CacheKey, true, nk, rh.Version}
+		ph.Action = RESP_DIFF
+		ph.IsPatch = true
+		ph.PatchTo = rh.Version
+
 		if bytes.Equal(cacheItem.Value, buff.Bytes()) {
 			ph.Version = rh.Version
 		} else {
 			s.cache.Set(rh.CacheKey, &CacheItem{nk, buff.Bytes()})
 		}
-		phBytes, _ := json.Marshal(&ph)
-		log.Print("send resp header ", string(phBytes))
-		diff := MakeDiff(cacheItem.Value, buff.Bytes())
-		s.socket.SendBytes(phBytes, zmq.SNDMORE) //used cache version
-		s.socket.SendBytes(diff, 0)              //send actuall diff
+		body = MakeDiff(cacheItem.Value, buff.Bytes())
 	} else {
-		ph = ResponseHeader{RESP_HTTP, rh.CacheKey, false, nk, ""}
-		phBytes, _ := json.Marshal(&ph)
-		log.Print("send resp header ", string(phBytes))
-		s.socket.SendBytes(phBytes, zmq.SNDMORE) //used cache version
-		s.socket.SendBytes(buff.Bytes(), 0)      //send actuall diff
+		ph.Action = RESP_HTTP
+		body = buff.Bytes()
 		s.cache.Set(rh.CacheKey, &CacheItem{nk, buff.Bytes()})
+		log.Printf("Set Cache : %s , %s", rh.CacheKey, nk)
 	}
+
+	header, _ = MarshalBinary(&ph)
+	s.send(envelope, header, body)
 
 	return nil
 
@@ -95,8 +120,7 @@ func (s *TunnelServer) onNewRequest(state zmq.State) (err error) {
 	}
 
 	var rh RequestHeader
-	json.Unmarshal([]byte(msgs[3]), &rh)
-	//TODO: chek action
+	_ = UnmarshalBinary(&rh, []byte(msgs[3]))
 
 	log.Print("recv req header ", msgs[3])
 
@@ -105,9 +129,10 @@ func (s *TunnelServer) onNewRequest(state zmq.State) (err error) {
 		req, _ := http.ReadRequest(reader)
 		resp, err := s.rt.RoundTrip(req)
 		if err != nil {
-			log.Print("fail to fetch error: ", err)
+			s.respChan <- &response{msgs[0], msgs[1], &rh, nil, err}
+		} else {
+			s.respChan <- &response{msgs[0], msgs[1], &rh, resp, nil}
 		}
-		s.respChan <- &response{msgs[0], msgs[1], &rh, resp}
 	}()
 	return nil
 }

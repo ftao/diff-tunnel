@@ -8,7 +8,7 @@ import (
 
 type HttpProxyServer struct {
 	proxy *goproxy.ProxyHttpServer
-	tc    *TunnelClient
+	rt    http.RoundTripper
 }
 
 var isMethodGetOrHeader = goproxy.ReqConditionFunc(func(r *http.Request, ctx *goproxy.ProxyCtx) bool {
@@ -16,20 +16,19 @@ var isMethodGetOrHeader = goproxy.ReqConditionFunc(func(r *http.Request, ctx *go
 })
 
 func (s *HttpProxyServer) ListenAndServe(bind string) error {
-	go s.tc.Run()
 	s.proxy.Verbose = true
 	s.proxy.OnRequest(isMethodGetOrHeader).DoFunc(s.handleRequest)
 	return http.ListenAndServe(bind, s.proxy)
 }
 
 func (s *HttpProxyServer) handleRequest(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	log.Print("XXX ", r.URL.String())
-	resp, _ := s.tc.Do(r)
+	resp, _ := s.rt.RoundTrip(r)
 	return r, resp
 }
 
 func clientMain(listen string, backend string) {
 	tc, _ := NewTunnelClient(backend)
+	go tc.Run()
 	proxy := goproxy.NewProxyHttpServer()
 
 	s := &HttpProxyServer{proxy, tc}
