@@ -44,6 +44,7 @@ func (s *HttpProxyServer) handleRequest(r *http.Request) (*http.Request, *http.R
 }
 
 func (s *HttpProxyServer) handleHttps(w http.ResponseWriter, r *http.Request) {
+	log.Print("handleHttps")
 	hij, ok := w.(http.Hijacker)
 	if !ok {
 		panic("httpserver does not support hijacking")
@@ -55,11 +56,14 @@ func (s *HttpProxyServer) handleHttps(w http.ResponseWriter, r *http.Request) {
 	}
 
 	host := r.URL.Host
-	if regexp.MustCompile(`:\d+$`).MatchString(host) {
+	if !regexp.MustCompile(`:\d+$`).MatchString(host) {
 		host += ":80"
 	}
 
 	remote, err := s.tc.Connect(host)
+
+	log.Print("connect made", err)
+
 	if err == nil {
 		proxyClient.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
 		go copyAndClose(proxyClient, remote)

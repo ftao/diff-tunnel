@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"log"
 	"net"
 )
@@ -39,20 +40,20 @@ func (tw *TcpWorker) readTo(conn net.Conn, envelope [][]byte) {
 	buff := make([]byte, 5*1024)
 	for {
 		n, err := conn.Read(buff)
-		if n == 0 {
-			break
+		if n > 0 {
+			body := make([]byte, n)
+			copy(body, buff[:n])
+			tw.repChan <- tw.makeRep(envelope, &ph, body)
 		}
-		if err != nil {
+		if err == io.EOF {
+			tw.repChan <- tw.makeRep(envelope, &ph, []byte(""))
+		} else if err != nil {
 			tw.repChan <- tw.makeErrorRep(envelope, err)
 		}
-		body := make([]byte, n)
-		copy(body, buff[:n])
-		tw.repChan <- tw.makeRep(envelope, &ph, body)
 	}
 }
 
 func (tw *TcpWorker) handleConnect(req [][]byte) [][]byte {
-	var body []byte
 	var ph ResponseHeader
 
 	conn, err := net.Dial("tcp", string(req[4]))
@@ -60,10 +61,9 @@ func (tw *TcpWorker) handleConnect(req [][]byte) [][]byte {
 		return tw.makeErrorRep(req[:3], err)
 	} else {
 		ph = ResponseHeader{Action: TCP_CONNECT_REP}
-		body = []byte("HTTP/1.0 200 OK\r\n\r\n")
 		tw.connections[string(req[1])] = conn
 		go tw.readTo(conn, req[0:3])
-		return tw.makeRep(req[:3], &ph, body)
+		return tw.makeRep(req[:3], &ph, []byte(""))
 	}
 }
 

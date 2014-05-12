@@ -85,14 +85,16 @@ func (c *TunnelClient) onNewRequest(msg interface{}) error {
 	m := msg.(*localMsg)
 	switch m.msgType {
 	case HTTP_REQ:
-		return c.onNewHttpRequest(m.streamId, m.data.(*http.Request))
+		return c.handleReqHttp(m.streamId, m.data.(*http.Request))
 	case TCP_CONNECT:
-		return c.onNewTcpConnect(m.streamId, m.data.(string))
+		return c.handleReqTcpConnect(m.streamId, m.data.(string))
+	case TCP_DATA:
+		return c.handleReqTcpData(m.streamId, m.data.([]byte))
 	}
 	return errors.New("invalid request")
 }
 
-func (c *TunnelClient) onNewHttpRequest(reqId string, request *http.Request) error {
+func (c *TunnelClient) handleReqHttp(reqId string, request *http.Request) error {
 
 	var buff bytes.Buffer
 	request.WriteProxy(&buff)
@@ -117,7 +119,7 @@ func (c *TunnelClient) onNewHttpRequest(reqId string, request *http.Request) err
 	return nil
 }
 
-func (c *TunnelClient) onNewTcpConnect(streamId string, host string) error {
+func (c *TunnelClient) handleReqTcpConnect(streamId string, host string) error {
 	rh := RequestHeader{Action: TCP_CONNECT}
 	header, _ := MarshalBinary(&rh)
 
@@ -125,6 +127,18 @@ func (c *TunnelClient) onNewTcpConnect(streamId string, host string) error {
 	c.socket.Send("", zmq.SNDMORE)
 	c.socket.SendBytes(header, zmq.SNDMORE) //local cache version
 	c.socket.Send(host, 0)                  //send actuall request
+
+	return nil
+}
+
+func (c *TunnelClient) handleReqTcpData(streamId string, data []byte) error {
+	rh := RequestHeader{Action: TCP_DATA}
+	header, _ := MarshalBinary(&rh)
+
+	c.socket.Send(streamId, zmq.SNDMORE)
+	c.socket.Send("", zmq.SNDMORE)
+	c.socket.SendBytes(header, zmq.SNDMORE) //local cache version
+	c.socket.SendBytes(data, 0)             //send actuall request
 
 	return nil
 }
@@ -137,13 +151,30 @@ func (c *TunnelClient) onNewResponse(state zmq.State) (err error) {
 	if len(msgs) != 4 {
 		return errors.New("unexpected msg count")
 	}
-	reqId := string(msgs[0])
-	//msgs[1] zero size
 
 	var ph ResponseHeader
 	_ = UnmarshalBinary(&ph, msgs[2])
 
 	log.Printf("recv resp header %s , body length %s", msgs[2], len(msgs[3]))
+
+	switch ph.Action {
+	case HTTP_REP:
+		return c.handleHttpRep(&ph, msgs)
+	case HTTP_DIFF_REP:
+		return c.handleHttpRep(&ph, msgs)
+	case TCP_CONNECT_REP:
+		return c.handleTcpConnectRep(&ph, msgs)
+	case TCP_DATA:
+		return c.handleTcpData(&ph, msgs)
+	case REP_ERROR:
+		return c.handleRepError(&ph, msgs)
+	}
+
+	return nil
+}
+
+func (c *TunnelClient) handleHttpRep(ph *ResponseHeader, msgs [][]byte) error {
+	reqId := string(msgs[0])
 
 	respBytes := msgs[3]
 	if ph.Action == HTTP_DIFF_REP && ph.IsPatch {
@@ -163,6 +194,37 @@ func (c *TunnelClient) onNewResponse(state zmq.State) (err error) {
 
 	respChan <- &localMsg{streamId: reqId, msgType: HTTP_REP, data: respBytes}
 
+	return nil
+}
+
+func (c *TunnelClient) handleTcpConnectRep(ph *ResponseHeader, msgs [][]byte) error {
+	reqId := string(msgs[0])
+	respChan, ok := c.respChans[reqId]
+	if !ok {
+		return errors.New("invalid request id")
+	}
+	respChan <- &localMsg{streamId: reqId, msgType: TCP_CONNECT_REP, data: msgs[3]}
+
+	return nil
+}
+
+func (c *TunnelClient) handleTcpData(ph *ResponseHeader, msgs [][]byte) error {
+	reqId := string(msgs[0])
+	respChan, ok := c.respChans[reqId]
+	if !ok {
+		return errors.New("invalid request id")
+	}
+	respChan <- &localMsg{streamId: reqId, msgType: TCP_DATA, data: msgs[3]}
+	return nil
+}
+
+func (c *TunnelClient) handleRepError(ph *ResponseHeader, msgs [][]byte) error {
+	reqId := string(msgs[0])
+	respChan, ok := c.respChans[reqId]
+	if !ok {
+		return errors.New("invalid request id")
+	}
+	respChan <- &localMsg{streamId: reqId, msgType: REP_ERROR, data: string(msgs[3])}
 	return nil
 }
 

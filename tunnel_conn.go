@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"io"
+	"log"
 	"net"
 	"time"
 )
@@ -20,7 +22,6 @@ type TunnelConn struct {
 func NewTunnelConn(id string, sendChan chan interface{}, recvChan chan *localMsg) *TunnelConn {
 	return &TunnelConn{
 		id: id, sendChan: sendChan, recvChan: recvChan,
-		recvBuff: make([]byte, 1024), sendBuff: make([]byte, 1024),
 	}
 }
 
@@ -36,28 +37,47 @@ func (c *TunnelConn) Read(b []byte) (n int, err error) {
 	}
 	n = len(c.recvBuff)
 
-	onRecvData := func(msg *localMsg) {
-		data := msg.data.([]byte)
-		cn := len(b) - n
-		if cn > len(data) {
-			cn = len(data)
-		}
-		copy(b[n:], data[:cn])
-		c.recvBuff = data[cn:]
-	}
+	var msg *localMsg
 
 	if c.readTimeout > 0 {
 		select {
-		case msg := <-c.recvChan:
-			onRecvData(msg)
+		case msg = <-c.recvChan:
 		case <-time.After(c.readTimeout):
 			c.recvBuff = c.recvBuff[n:]
 			err = errors.New("Read Timeout")
+			return
 		}
 	} else {
-		msg := <-c.recvChan
-		onRecvData(msg)
+		msg = <-c.recvChan
 	}
+
+	//the channel is closed
+	if msg == nil {
+		n = 0
+		err = errors.New("Closed")
+		return
+	}
+
+	if msg.msgType == REP_ERROR {
+		n = 0
+		err = errors.New(string(msg.data.([]byte)))
+	} else {
+		log.Printf("msg %d , %d, current %d ", msg.msgType, len(msg.data.([]byte)), n)
+		data := msg.data.([]byte)
+		if len(data) == 0 {
+			n = 0
+			err = io.EOF
+		} else {
+			cn := len(b) - n
+			if cn > len(data) {
+				cn = len(data)
+			}
+			copy(b[n:n+cn], data[:cn])
+			c.recvBuff = data[cn:]
+			n = n + cn
+		}
+	}
+	log.Printf("read %d %d", n, len(b))
 	return
 }
 
@@ -90,7 +110,6 @@ func (c *TunnelConn) RemoteAddr() net.Addr {
 
 func (c *TunnelConn) Close() error {
 	close(c.sendChan)
-	close(c.recvChan)
 	return nil
 }
 

@@ -31,6 +31,7 @@ func NewTunnelServer(bind string) (*TunnelServer, error) {
 
 func (s *TunnelServer) Run() error {
 	go s.httpWorker.Run()
+	go s.tcpWorker.Run()
 	reactor := zmq.NewReactor()
 	reactor.AddSocket(s.socket, zmq.POLLIN, s.onNewRequest)
 	reactor.AddChannel(s.repChan, 1, s.onNewResponse)
