@@ -1,36 +1,59 @@
 package main
 
 import (
-	"github.com/elazarl/goproxy"
+	"io"
 	"log"
 	"net/http"
 )
 
-type HttpProxyServer struct {
-	proxy *goproxy.ProxyHttpServer
-	rt    http.RoundTripper
+func copyHeaders(dst, src http.Header) {
+	for k, _ := range dst {
+		dst.Del(k)
+	}
+	for k, vs := range src {
+		for _, v := range vs {
+			dst.Add(k, v)
+		}
+	}
 }
 
-var isMethodGetOrHeader = goproxy.ReqConditionFunc(func(r *http.Request, ctx *goproxy.ProxyCtx) bool {
-	return r.Method == "GET" || r.Method == "HEAD"
-})
+type HttpProxyServer struct {
+	rt http.RoundTripper
+}
 
 func (s *HttpProxyServer) ListenAndServe(bind string) error {
-	s.proxy.Verbose = true
-	s.proxy.OnRequest(isMethodGetOrHeader).DoFunc(s.handleRequest)
-	return http.ListenAndServe(bind, s.proxy)
+	return http.ListenAndServe(bind, s)
 }
 
-func (s *HttpProxyServer) handleRequest(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+func (s *HttpProxyServer) handleRequest(r *http.Request) (*http.Request, *http.Response) {
 	resp, _ := s.rt.RoundTrip(r)
 	return r, resp
+}
+
+func (s *HttpProxyServer) handleHttps(w http.ResponseWriter, r *http.Request) {
+	//hijack https request
+}
+
+func (s *HttpProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+
+	//r.Header["X-Forwarded-For"] = w.RemoteAddr()
+	if r.Method == "CONNECT" {
+		s.handleHttps(w, r)
+	} else {
+		_, resp := s.handleRequest(r)
+		copyHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		nr, err := io.Copy(w, resp.Body)
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Can't close response body %v", err)
+		}
+		log.Printf("Copied %v bytes to client error=%v", nr, err)
+	}
 }
 
 func clientMain(listen string, backend string) {
 	tc, _ := NewTunnelClient(backend)
 	go tc.Run()
-	proxy := goproxy.NewProxyHttpServer()
-
-	s := &HttpProxyServer{proxy, tc}
+	s := &HttpProxyServer{tc}
 	log.Fatal(s.ListenAndServe(listen))
 }
