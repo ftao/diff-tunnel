@@ -21,6 +21,7 @@ type LocalCache struct {
 	store map[string]*CacheItem
 }
 
+//TODO: make this thread-safe
 func (c *LocalCache) Set(key string, value *CacheItem) {
 	c.store[key] = value
 }

@@ -6,12 +6,13 @@ import (
 )
 
 const (
-	REQ_HTTP_GET  int = 1
-	REQ_CACHE_GET int = 2
-
-	RESP_DIFF  int = 1
-	RESP_HTTP  int = 2
-	RESP_ERROR int = 3
+	TCP_CONNECT     int = 1
+	TCP_SEND        int = 2
+	HTTP_REQ        int = 3
+	TCP_CONNECT_REP int = 4
+	HTTP_REP        int = 5
+	HTTP_DIFF_REP   int = 6
+	REP_ERROR       int = 255
 )
 
 type RequestHeader struct {
