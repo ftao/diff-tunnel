@@ -65,7 +65,7 @@ func (c *TunnelConn) Write(b []byte) (n int, err error) {
 	data := make([]byte, len(b), len(b))
 	copy(data, b)
 
-	sdata := localMsg{c.id, TCP_SEND, data}
+	sdata := localMsg{c.id, TCP_DATA, data}
 
 	if c.writeTimeout > 0 {
 		select {

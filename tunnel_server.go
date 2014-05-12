@@ -19,13 +19,14 @@ type TunnelServer struct {
 	socket     *zmq.Socket
 	repChan    chan interface{}
 	httpWorker *HttpWorker
+	tcpWorker  *TcpWorker
 }
 
 func NewTunnelServer(bind string) (*TunnelServer, error) {
 	socket, _ := zmq.NewSocket(zmq.ROUTER)
 	socket.Bind(bind)
 	repChan := make(chan interface{}, 1)
-	return &TunnelServer{socket, repChan, NewHttpWorker(repChan)}, nil
+	return &TunnelServer{socket, repChan, NewHttpWorker(repChan), NewTcpWorker(repChan)}, nil
 }
 
 func (s *TunnelServer) Run() error {
@@ -54,10 +55,15 @@ func (s *TunnelServer) onNewRequest(state zmq.State) (err error) {
 	var rh RequestHeader
 	_ = UnmarshalBinary(&rh, []byte(msgs[3]))
 
-	//forward to http worker
-	if rh.Action == HTTP_REQ {
+	switch rh.Action {
+	case HTTP_REQ:
 		s.httpWorker.SendRequest(msgs)
+	case TCP_CONNECT:
+		s.tcpWorker.SendRequest(msgs)
+	case TCP_DATA:
+		s.tcpWorker.SendRequest(msgs)
 	}
+
 	return nil
 }
 

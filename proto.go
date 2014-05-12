@@ -7,7 +7,7 @@ import (
 
 const (
 	TCP_CONNECT     int = 1
-	TCP_SEND        int = 2
+	TCP_DATA        int = 2
 	HTTP_REQ        int = 3
 	TCP_CONNECT_REP int = 4
 	HTTP_REP        int = 5
