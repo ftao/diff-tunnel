@@ -12,14 +12,14 @@ import (
 type TunnelConn struct {
 	id           string
 	sendChan     chan interface{}
-	recvChan     chan *localMsg
+	recvChan     chan interface{}
 	recvBuff     []byte
 	sendBuff     []byte
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 }
 
-func NewTunnelConn(id string, sendChan chan interface{}, recvChan chan *localMsg) *TunnelConn {
+func NewTunnelConn(id string, sendChan chan interface{}, recvChan chan interface{}) *TunnelConn {
 	return &TunnelConn{
 		id: id, sendChan: sendChan, recvChan: recvChan,
 	}
@@ -37,26 +37,28 @@ func (c *TunnelConn) Read(b []byte) (n int, err error) {
 	}
 	n = len(c.recvBuff)
 
-	var msg *localMsg
+	var item interface{}
 
 	if c.readTimeout > 0 {
 		select {
-		case msg = <-c.recvChan:
+		case item = <-c.recvChan:
 		case <-time.After(c.readTimeout):
 			c.recvBuff = c.recvBuff[n:]
 			err = errors.New("Read Timeout")
 			return
 		}
 	} else {
-		msg = <-c.recvChan
+		item = <-c.recvChan
 	}
 
 	//the channel is closed
-	if msg == nil {
+	if item == nil {
 		n = 0
 		err = errors.New("Closed")
 		return
 	}
+
+	msg := item.(*localMsg)
 
 	if msg.msgType == REP_ERROR {
 		n = 0

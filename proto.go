@@ -12,6 +12,8 @@ const (
 	TCP_CONNECT_REP int = 4
 	HTTP_REP        int = 5
 	HTTP_DIFF_REP   int = 6
+	HTTP_DATA       int = 7
+	HTTP_END        int = 8
 	REP_ERROR       int = 255
 )
 
@@ -19,6 +21,7 @@ type RequestHeader struct {
 	Action   int
 	CacheKey string
 	Version  []byte
+	NoCache  bool
 }
 
 type ResponseHeader struct {

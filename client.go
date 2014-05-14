@@ -38,9 +38,15 @@ func (s *HttpProxyServer) ListenAndServe(bind string) error {
 	return http.ListenAndServe(bind, s)
 }
 
-func (s *HttpProxyServer) handleRequest(r *http.Request) (*http.Request, *http.Response) {
+func (s *HttpProxyServer) handleHttp(w http.ResponseWriter, r *http.Request) {
 	resp, _ := s.tc.RoundTrip(r)
-	return r, resp
+	copyHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	nr, err := io.Copy(w, resp.Body)
+	if err := resp.Body.Close(); err != nil {
+		log.Printf("Can't close response body %v", err)
+	}
+	log.Printf("Copied %v bytes to client error=%v", nr, err)
 }
 
 func (s *HttpProxyServer) handleHttps(w http.ResponseWriter, r *http.Request) {
@@ -75,19 +81,10 @@ func (s *HttpProxyServer) handleHttps(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HttpProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-
-	//r.Header["X-Forwarded-For"] = w.RemoteAddr()
 	if r.Method == "CONNECT" {
 		s.handleHttps(w, r)
 	} else {
-		_, resp := s.handleRequest(r)
-		copyHeaders(w.Header(), resp.Header)
-		w.WriteHeader(resp.StatusCode)
-		nr, err := io.Copy(w, resp.Body)
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Can't close response body %v", err)
-		}
-		log.Printf("Copied %v bytes to client error=%v", nr, err)
+		s.handleHttp(w, r)
 	}
 }
 

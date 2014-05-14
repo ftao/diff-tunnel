@@ -18,9 +18,18 @@ type localMsg struct {
 	data     interface{}
 }
 
+func (m *localMsg) GetBytes() []byte {
+	data, ok := m.data.([]byte)
+	if ok {
+		return data
+	} else {
+		return []byte("")
+	}
+}
+
 type TunnelClient struct {
 	socket    *zmq.Socket
-	respChans map[string]chan *localMsg
+	respChans map[string]chan interface{}
 	reqChan   chan interface{}
 	cache     Cache
 }
@@ -31,21 +40,22 @@ func NewTunnelClient(remote string) (*TunnelClient, error) {
 	socket.Connect(remote)
 	return &TunnelClient{
 		socket,
-		make(map[string]chan *localMsg),
+		make(map[string]chan interface{}),
 		make(chan interface{}, 1),
 		makeCache()}, nil
 }
 
 func (c *TunnelClient) Connect(host string) (net.Conn, error) {
 	streamId := string([]byte(uuid.NewUUID()))
-	respChan := make(chan *localMsg, 1)
+	respChan := make(chan interface{}, 1)
 	c.respChans[streamId] = respChan
 
 	c.reqChan <- &localMsg{streamId, TCP_CONNECT, host}
 
 	connResp := <-respChan
-	if connResp.msgType == REP_ERROR {
-		return nil, errors.New("Connect Error : " + connResp.data.(string))
+	msg := connResp.(*localMsg)
+	if msg.msgType == REP_ERROR {
+		return nil, errors.New("Connect Error : " + msg.data.(string))
 	}
 	//TODO: connect timeout
 
@@ -57,19 +67,15 @@ func (c *TunnelClient) Connect(host string) (net.Conn, error) {
 // send http request via the tunnel
 func (c *TunnelClient) RoundTrip(r *http.Request) (*http.Response, error) {
 	reqId := string([]byte(uuid.NewUUID()))
-	respChan := make(chan *localMsg, 1)
+	respChan := make(chan interface{}, 1)
 	c.respChans[reqId] = respChan
 	c.reqChan <- &localMsg{streamId: reqId, msgType: HTTP_REQ, data: r}
-	//TODO: add timeout , check RFC for status code about proxy timeout
-	respMsg := <-respChan
-	data := respMsg.data.([]byte)
 
-	reader := bufio.NewReader(bytes.NewBuffer(data))
+	reader := bufio.NewReader(&ChannelReaderCloser{channel: respChan})
 	resp, err := http.ReadResponse(reader, nil)
 	if err != nil {
 		return nil, err
 	}
-	delete(c.respChans, reqId)
 	return resp, nil
 }
 
@@ -95,12 +101,25 @@ func (c *TunnelClient) onNewRequest(msg interface{}) error {
 }
 
 func (c *TunnelClient) handleReqHttp(reqId string, request *http.Request) error {
+	return c.handleReqHttpGet(reqId, request)
+	/*
+	   if request.Method == "GET" {
+	       return c.handleReqHttpGet(reqId, request)
+	   } else {
+	       return c.handleReqHttpNoGet(reqId, request)
+	   }
+	*/
 
+}
+func (c *TunnelClient) handleReqHttpGet(reqId string, request *http.Request) error {
 	var buff bytes.Buffer
 	request.WriteProxy(&buff)
 
 	cacheKey := makeCacheKey(request)
 	rh := RequestHeader{Action: HTTP_REQ, CacheKey: cacheKey}
+	if request.Method != "GET" {
+		rh.NoCache = true
+	}
 
 	if cacheItem, ok := c.cache.Get(cacheKey); ok {
 		rh.Version = cacheItem.Version
@@ -118,6 +137,44 @@ func (c *TunnelClient) handleReqHttp(reqId string, request *http.Request) error 
 
 	return nil
 }
+
+/*
+func (c *TunnelClient) handleReqHttpNoGet(reqId string, request *http.Request) error {
+	pr, pw := io.Pipe()
+
+	var buff bytes.Buffer
+	go func() {
+		request.WriteProxy(pw)
+		pw.Close()
+	}()
+
+	rh := RequestHeader{Action: HTTP_DATA}
+	header, _ := MarshalBinary(&rh)
+
+	buf := make([]byte, 1024*5)
+	for {
+		n, err := pr.Read(buf)
+		if n > 0 {
+			c.socket.Send(reqId, zmq.SNDMORE)
+			c.socket.Send("", zmq.SNDMORE)
+			c.socket.SendBytes(header, zmq.SNDMORE) //local cache version
+			c.socket.SendBytes(buff[:n], 0)         //send actuall request
+		}
+		if err == io.EOF {
+			break
+		}
+	}
+
+	rh = RequestHeader{Action: HTTP_END}
+	header, _ = MarshalBinary(&rh)
+	c.socket.Send(reqId, zmq.SNDMORE)
+	c.socket.Send("", zmq.SNDMORE)
+	c.socket.SendBytes(header, zmq.SNDMORE) //local cache version
+	c.socket.SendBytes([]byte(""), 0)       //send actuall request
+
+	return nil
+}
+*/
 
 func (c *TunnelClient) handleReqTcpConnect(streamId string, host string) error {
 	rh := RequestHeader{Action: TCP_CONNECT}
@@ -162,6 +219,8 @@ func (c *TunnelClient) onNewResponse(state zmq.State) (err error) {
 		return c.handleHttpRep(&ph, msgs)
 	case HTTP_DIFF_REP:
 		return c.handleHttpRep(&ph, msgs)
+	case HTTP_DATA:
+		return c.handleHttpData(&ph, msgs)
 	case TCP_CONNECT_REP:
 		return c.handleTcpConnectRep(&ph, msgs)
 	case TCP_DATA:
@@ -193,7 +252,28 @@ func (c *TunnelClient) handleHttpRep(ph *ResponseHeader, msgs [][]byte) error {
 	}
 
 	respChan <- &localMsg{streamId: reqId, msgType: HTTP_REP, data: respBytes}
+	close(respChan)
+	return nil
+}
 
+func (c *TunnelClient) handleHttpData(ph *ResponseHeader, msgs [][]byte) error {
+	reqId := string(msgs[0])
+	respBytes := msgs[3]
+	respChan, ok := c.respChans[reqId]
+	if !ok {
+		return errors.New("invalid request id")
+	}
+	respChan <- &localMsg{streamId: reqId, msgType: HTTP_DATA, data: respBytes}
+	return nil
+}
+
+func (c *TunnelClient) handleHttpEnd(ph *ResponseHeader, msgs [][]byte) error {
+	reqId := string(msgs[0])
+	respChan, ok := c.respChans[reqId]
+	if !ok {
+		return errors.New("invalid request id")
+	}
+	close(respChan)
 	return nil
 }
 

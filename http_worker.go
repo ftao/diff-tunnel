@@ -23,8 +23,7 @@ func (hw *HttpWorker) Run() {
 	for {
 		req := <-hw.reqChan
 		go func() {
-			rep := hw.handle(req.([][]byte))
-			hw.repChan <- rep
+			hw.handle(req.([][]byte))
 		}()
 	}
 }
@@ -33,7 +32,7 @@ func (hw *HttpWorker) SendRequest(req [][]byte) {
 	hw.reqChan <- req
 }
 
-func (hw *HttpWorker) handle(req [][]byte) [][]byte {
+func (hw *HttpWorker) handle(req [][]byte) {
 	var rh RequestHeader
 	_ = UnmarshalBinary(&rh, []byte(req[3]))
 
@@ -41,19 +40,31 @@ func (hw *HttpWorker) handle(req [][]byte) [][]byte {
 	httpReq, _ := http.ReadRequest(reader)
 	httpRep, err := hw.rt.RoundTrip(httpReq)
 
-	rep := [][]byte{
-		req[0],
-		req[1],
-		[]byte(""),
-		[]byte(""),
-		[]byte(""),
-	}
 	var header []byte
 	var body []byte
 
 	var ph ResponseHeader
+	if err != nil {
+		ph = ResponseHeader{Action: REP_ERROR}
+		header, _ = MarshalBinary(&ph)
+		body = []byte(err.Error())
+		hw.repChan <- [][]byte{req[0], req[1], req[2], header, body}
+	}
 
-	if err == nil {
+	//no cache, just stream
+	if rh.NoCache {
+		ph = ResponseHeader{Action: HTTP_DATA}
+		header, _ = MarshalBinary(&ph)
+		prefix := [][]byte{req[0], req[1], req[2], header}
+		writer := bufio.NewWriter(&ChannelWriterCloser{hw.repChan, prefix})
+		httpRep.Write(writer)
+		writer.Flush()
+
+		ph = ResponseHeader{Action: HTTP_END}
+		header, _ = MarshalBinary(&ph)
+		hw.repChan <- [][]byte{req[0], req[1], req[2], header, []byte("")}
+
+	} else {
 		var buff bytes.Buffer
 		httpRep.Write(&buff)
 		body = buff.Bytes()
@@ -64,17 +75,9 @@ func (hw *HttpWorker) handle(req [][]byte) [][]byte {
 		} else {
 			ph = ResponseHeader{Action: HTTP_REP, CacheKey: rh.CacheKey, Version: newVersion, IsPatch: hit}
 		}
-	} else {
-		ph = ResponseHeader{Action: REP_ERROR}
-		body = []byte(err.Error())
+		header, _ = MarshalBinary(&ph)
+		hw.repChan <- [][]byte{req[0], req[1], req[2], header, body}
 	}
-
-	log.Printf("send back header %s, body length %s", ph, len(body))
-	header, _ = MarshalBinary(&ph)
-
-	rep[3] = header
-	rep[4] = body
-	return rep
 }
 
 //check for cache , if possible make diff, and send back diff
