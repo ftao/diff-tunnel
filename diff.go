@@ -20,3 +20,9 @@ func Patch(old []byte, patch []byte) []byte {
 	binarydist.Patch(oldR, newR, patchR)
 	return newR.Bytes()
 }
+
+type DiffContent struct {
+	CacheKey []byte
+	PatchTo  []byte
+	Diff     []byte
+}

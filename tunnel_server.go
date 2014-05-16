@@ -1,68 +1,68 @@
 package main
 
 import (
-	"errors"
 	zmq "github.com/pebbe/zmq4"
-	"net/http"
-	"time"
+	"log"
 )
 
-type response struct {
-	connId    string
-	reqId     string
-	reqHeader *RequestHeader
-	resp      *http.Response
-	err       error
-}
-
 type TunnelServer struct {
-	socket     *zmq.Socket
-	repChan    chan interface{}
-	httpWorker *HttpWorker
-	tcpWorker  *TcpWorker
+	socket      *zmq.Socket
+	repChan     chan *Msg
+	httpWorker  Worker
+	tcpWorker   Worker
+	cacheWorker Worker
 }
 
 func NewTunnelServer(bind string) (*TunnelServer, error) {
+	cm := makeCacheManager()
 	socket, _ := zmq.NewSocket(zmq.ROUTER)
 	socket.Bind(bind)
-	repChan := make(chan interface{}, 1)
-	return &TunnelServer{socket, repChan, NewHttpWorker(repChan), NewTcpWorker(repChan)}, nil
+	repChan := make(chan *Msg, 10)
+	return &TunnelServer{
+		socket, repChan,
+		NewMultiStreamHttpWorker(cm),
+		NewMultiStreamTcpWorker(),
+		NewCacheWorker(cm),
+	}, nil
 }
 
 func (s *TunnelServer) Run() error {
-	go s.httpWorker.Run()
-	go s.tcpWorker.Run()
-	reactor := zmq.NewReactor()
-	reactor.AddSocket(s.socket, zmq.POLLIN, s.onNewRequest)
-	reactor.AddChannel(s.repChan, 1, s.onNewResponse)
-	reactor.Run(time.Duration(50) * time.Millisecond)
-	return nil
-}
+	go s.httpWorker.Run(s.repChan)
+	go s.tcpWorker.Run(s.repChan)
+	go s.cacheWorker.Run(s.repChan)
 
-func (s *TunnelServer) onNewResponse(msgs interface{}) (err error) {
-	s.socket.SendMessage(msgs)
-	return nil
-}
+	go func() {
+		for msg := range s.repChan {
+			frames, _ := toFrames(msg)
+			log.Printf("[ts]send msg %s", msg)
+			if msg.GetMsgType() == ERROR {
+				log.Printf("error msg:%s", msg.Body.(*ErrorData).String())
+			}
+			s.socket.SendMessage(frames)
+		}
+	}()
 
-func (s *TunnelServer) onNewRequest(state zmq.State) (err error) {
-	msgs, err := s.socket.RecvMessageBytes(0)
-	if err != nil {
-		return
-	}
-	if len(msgs) != 5 {
-		return errors.New("unexpected msg count")
-	}
+	for {
+		frames, err := s.socket.RecvMessageBytes(0)
+		if err != nil {
+			continue
+		}
+		msg, err := fromFrames(frames)
+		if err != nil {
+			log.Printf("[ts]invalid frames %s", err.Error())
+			continue
+		}
+		log.Printf("[ts]recv msg %s", msg)
 
-	var rh RequestHeader
-	_ = UnmarshalBinary(&rh, []byte(msgs[3]))
-
-	switch rh.Action {
-	case HTTP_REQ:
-		s.httpWorker.SendRequest(msgs)
-	case TCP_CONNECT:
-		s.tcpWorker.SendRequest(msgs)
-	case TCP_DATA:
-		s.tcpWorker.SendRequest(msgs)
+		if msg.GetMsgType() == CACHE_SHARE {
+			s.cacheWorker.GetReqChannel() <- msg
+			continue
+		}
+		if msg.TestFlag(FLAG_HTTP) {
+			s.httpWorker.GetReqChannel() <- msg
+		} else {
+			s.tcpWorker.GetReqChannel() <- msg
+		}
 	}
 
 	return nil

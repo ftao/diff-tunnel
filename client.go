@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"io"
 	"log"
 	"net"
@@ -19,38 +20,24 @@ func copyHeaders(dst, src http.Header) {
 	}
 }
 
-func copyAndClose(w net.Conn, r io.Reader) {
-	connOk := true
-	if _, err := io.Copy(w, r); err != nil {
-		connOk = false
-		log.Printf("Error copying to client %s", err)
-	}
-	if err := w.Close(); err != nil && connOk {
-		log.Printf("Error closing %s", err)
-	}
+type TcpTransport interface {
+	ConnectTcp(address string) (net.Conn, error)
+}
+
+type HttpTransport interface {
+	RoundTrip(r *http.Request) (io.ReadCloser, error)
 }
 
 type HttpProxyServer struct {
-	tc *TunnelClient
+	ht HttpTransport
+	tt TcpTransport
 }
 
 func (s *HttpProxyServer) ListenAndServe(bind string) error {
 	return http.ListenAndServe(bind, s)
 }
 
-func (s *HttpProxyServer) handleHttp(w http.ResponseWriter, r *http.Request) {
-	resp, _ := s.tc.RoundTrip(r)
-	copyHeaders(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	nr, err := io.Copy(w, resp.Body)
-	if err := resp.Body.Close(); err != nil {
-		log.Printf("Can't close response body %v", err)
-	}
-	log.Printf("Copied %v bytes to client error=%v", nr, err)
-}
-
-func (s *HttpProxyServer) handleHttps(w http.ResponseWriter, r *http.Request) {
-	log.Print("handleHttps")
+func (s *HttpProxyServer) hijack(w http.ResponseWriter, r *http.Request) (net.Conn, string) {
 	hij, ok := w.(http.Hijacker)
 	if !ok {
 		panic("httpserver does not support hijacking")
@@ -66,17 +53,41 @@ func (s *HttpProxyServer) handleHttps(w http.ResponseWriter, r *http.Request) {
 		host += ":80"
 	}
 
-	remote, err := s.tc.Connect(host)
+	return proxyClient, host
+}
 
-	log.Print("connect made", err)
+func (s *HttpProxyServer) handleHttp(w http.ResponseWriter, r *http.Request) {
+	reader, err := s.ht.RoundTrip(r)
+	if err != nil {
+		log.Printf("error got response %v", err)
+		return
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(reader), r)
+	if err != nil {
+		log.Printf("error got response %v", err)
+		return
+	}
+	defer reader.Close()
 
+	copyHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, err = io.Copy(w, resp.Body)
+	if err != nil {
+		log.Printf("error copy to client %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		log.Printf("Can't close response body %v", err)
+	}
+}
+
+func (s *HttpProxyServer) handleHttps(w http.ResponseWriter, r *http.Request) {
+	proxyClient, host := s.hijack(w, r)
+	remote, err := s.tt.ConnectTcp(host)
 	if err == nil {
 		proxyClient.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
-		go copyAndClose(proxyClient, remote)
-		go copyAndClose(remote, proxyClient)
+		piping(proxyClient, remote)
 	} else {
-		proxyClient.Write([]byte("HTTP/1.0 500 Internl Server Error\r\n\r\n"))
-		proxyClient.Write([]byte(err.Error()))
+		proxyClient.Write([]byte("HTTP/1.0 502 Bad Gateway\r\n\r\n"))
 	}
 }
 
@@ -91,6 +102,6 @@ func (s *HttpProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func clientMain(listen string, backend string) {
 	tc, _ := NewTunnelClient(backend)
 	go tc.Run()
-	s := &HttpProxyServer{tc}
+	s := &HttpProxyServer{tc, tc}
 	log.Fatal(s.ListenAndServe(listen))
 }

@@ -2,105 +2,83 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"log"
 	"net/http"
+	"time"
+)
+
+const (
+	MAX_CACHE_SIZE int = 5 * 1024 * 1024
+	MAX_BUFF_SIZE  int = 500 * 1024
 )
 
 type HttpWorker struct {
-	reqChan chan interface{}
-	repChan chan interface{}
-	rt      http.RoundTripper
-	cache   Cache
+	reqChan chan *Msg
+	ht      *http.Transport
+	cm      *CacheManager
 }
 
-func NewHttpWorker(repChan chan interface{}) *HttpWorker {
-	reqChan := make(chan interface{}, 1)
-	return &HttpWorker{reqChan, repChan, &http.Transport{}, makeCache()}
+func (w *HttpWorker) GetReqChannel() chan *Msg {
+	return w.reqChan
 }
 
-func (hw *HttpWorker) Run() {
-	for {
-		req := <-hw.reqChan
-		go func() {
-			hw.handle(req.([][]byte))
-		}()
-	}
-}
+func (w *HttpWorker) Run(repChan chan *Msg) error {
+	firstMsg := <-w.reqChan
+	msgMaker := NewMsgBuilderFromMsg(firstMsg)
 
-func (hw *HttpWorker) SendRequest(req [][]byte) {
-	hw.reqChan <- req
-}
+	var err error
+	defer func() {
+		if err != nil {
+			repChan <- msgMaker.MakeErrorMsg(err, 0)
+		}
+	}()
 
-func (hw *HttpWorker) handle(req [][]byte) {
-	var rh RequestHeader
-	_ = UnmarshalBinary(&rh, []byte(req[3]))
-
-	reader := bufio.NewReader(bytes.NewBuffer(req[4]))
-	httpReq, _ := http.ReadRequest(reader)
-	httpRep, err := hw.rt.RoundTrip(httpReq)
-
-	var header []byte
-	var body []byte
-
-	var ph ResponseHeader
+	reader := &TunnelReader{recvChan: w.reqChan, initMsg: firstMsg}
+	req, err := http.ReadRequest(bufio.NewReader(reader))
 	if err != nil {
-		ph = ResponseHeader{Action: REP_ERROR}
-		header, _ = MarshalBinary(&ph)
-		body = []byte(err.Error())
-		hw.repChan <- [][]byte{req[0], req[1], req[2], header, body}
+		log.Printf("read request errror: %v", err)
+		return err
+	}
+	resp, err := w.ht.RoundTrip(req)
+	if err != nil {
+		log.Printf("round trip errror: %v", err)
+		return err
 	}
 
-	//no cache, just stream
-	if rh.NoCache {
-		ph = ResponseHeader{Action: HTTP_DATA}
-		header, _ = MarshalBinary(&ph)
-		prefix := [][]byte{req[0], req[1], req[2], header}
-		writer := bufio.NewWriter(&ChannelWriterCloser{hw.repChan, prefix})
-		httpRep.Write(writer)
-		writer.Flush()
+	cacheAble := resp.ContentLength < int64(MAX_CACHE_SIZE)
 
-		ph = ResponseHeader{Action: HTTP_END}
-		header, _ = MarshalBinary(&ph)
-		hw.repChan <- [][]byte{req[0], req[1], req[2], header, []byte("")}
-
+	writer := &TunnelWriter{
+		sendChan: repChan,
+		msgMaker: msgMaker,
+	}
+	if cacheAble {
+		cacheKey := makeCacheKey(req)
+		digest, _ := w.cm.GetPeerDigest("global", cacheKey)
+		cwriter := NewCachedTunnelWriter(writer, NewCacheCompressor(w.cm.local, cacheKey, digest, true))
+		resp.Write(cwriter)
+		cwriter.Close()
 	} else {
-		var buff bytes.Buffer
-		httpRep.Write(&buff)
-		body = buff.Bytes()
-		hit, newVersion, newBody := hw.updateWithCache(&rh, body)
-		body = newBody
-		if hit {
-			ph = ResponseHeader{Action: HTTP_DIFF_REP, CacheKey: rh.CacheKey, Version: newVersion, IsPatch: hit, PatchTo: rh.Version}
-		} else {
-			ph = ResponseHeader{Action: HTTP_REP, CacheKey: rh.CacheKey, Version: newVersion, IsPatch: hit}
-		}
-		header, _ = MarshalBinary(&ph)
-		hw.repChan <- [][]byte{req[0], req[1], req[2], header, body}
+		log.Printf("result is not cacheable, content-length %d", resp.ContentLength)
+		bw := &TimeoutWriter{bw: bufio.NewWriterSize(writer, MAX_BUFF_SIZE), timeout: 10 * time.Millisecond}
+		resp.Write(bw)
+		bw.Flush()
+		writer.Close()
 	}
+	return nil
 }
 
-//check for cache , if possible make diff, and send back diff
-func (hw *HttpWorker) updateWithCache(rh *RequestHeader, body []byte) (hit bool, newVersion []byte, newBody []byte) {
-	newVersion = hw.cache.GenVersion(rh.CacheKey)
-	cacheItem, ok := hw.cache.Get(rh.CacheKey)
-	hit = ok && bytes.Equal(cacheItem.Version, rh.Version)
-	updateCache := true
+type HttpWorkerFactory struct {
+	cm *CacheManager
+}
 
-	if hit {
-		log.Printf("Hit Cache : %s , %s", rh.CacheKey, rh.Version)
-		if bytes.Equal(cacheItem.Value, body) {
-			updateCache = false
-			newVersion = rh.Version
-		}
-		newBody = MakeDiff(cacheItem.Value, body)
-	} else {
-		newBody = body
-	}
+func (s *HttpWorkerFactory) MakeStreamWorker(sid UID) Worker {
+	return &HttpWorker{make(chan *Msg, 10), new(http.Transport), s.cm}
+}
 
-	if updateCache {
-		log.Printf("Set Cache : %s , %s", rh.CacheKey, newVersion)
-		hw.cache.Set(rh.CacheKey, &CacheItem{newVersion, body})
+func NewMultiStreamHttpWorker(cm *CacheManager) Worker {
+	return &MultiStreamWorker{
+		factory: &HttpWorkerFactory{cm: cm},
+		workers: make(map[UID]Worker),
+		reqChan: make(chan *Msg),
 	}
-	return
 }
