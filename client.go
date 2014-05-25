@@ -99,8 +99,8 @@ func (s *HttpProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func clientMain(listen string, backend string) {
-	tc, _ := NewTunnelClient(backend)
+func clientMain(listen string, backend string, serverPub string, pub string, secret string) {
+	tc, _ := NewTunnelClientKeyPair(backend, serverPub, pub, secret)
 	go tc.Run()
 	s := &HttpProxyServer{tc, tc}
 	log.Fatal(s.ListenAndServe(listen))

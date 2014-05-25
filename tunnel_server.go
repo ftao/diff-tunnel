@@ -26,6 +26,26 @@ func NewTunnelServer(bind string) (*TunnelServer, error) {
 	}, nil
 }
 
+func NewTunnelServerKeyPair(bind string, pub string, secret string) (*TunnelServer, error) {
+	if len(pub) == 0 || len(secret) == 0 {
+		return NewTunnelServer(bind)
+	}
+	zmq.AuthCurveAdd("global", zmq.CURVE_ALLOW_ANY)
+	cm := makeCacheManager()
+	socket, _ := zmq.NewSocket(zmq.ROUTER)
+	socket.ServerAuthCurve("global", secret)
+	socket.Bind(bind)
+	repChan := make(chan *Msg, 10)
+	zmq.AuthStart()
+	zmq.AuthCurveAdd(zmq.CURVE_ALLOW_ANY)
+	return &TunnelServer{
+		socket, repChan,
+		NewMultiStreamHttpWorker(cm),
+		NewMultiStreamTcpWorker(),
+		NewCacheWorker(cm),
+	}, nil
+}
+
 func (s *TunnelServer) Run() error {
 	go s.httpWorker.Run(s.repChan)
 	go s.tcpWorker.Run(s.repChan)

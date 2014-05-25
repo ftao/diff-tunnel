@@ -29,6 +29,21 @@ func NewTunnelClient(remote string) (*TunnelClient, error) {
 	}, nil
 }
 
+func NewTunnelClientKeyPair(remote string, server_pub string, pub string, secret string) (*TunnelClient, error) {
+	if len(server_pub) == 0 || len(pub) == 0 || len(secret) == 0 {
+		return NewTunnelClient(remote)
+	}
+	socket, _ := zmq.NewSocket(zmq.DEALER)
+	socket.ClientAuthCurve(server_pub, pub, secret)
+	socket.Connect(remote)
+	return &TunnelClient{
+		socket,
+		make(map[UID]chan *Msg),
+		make(chan *Msg, 1),
+		makeCacheManager(),
+	}, nil
+}
+
 func (c *TunnelClient) ConnectTcp(host string) (net.Conn, error) {
 	sid := MakeUID()
 	repChan := make(chan *Msg, 1)

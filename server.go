@@ -4,7 +4,7 @@ import (
 	"log"
 )
 
-func serverMain(bind string) {
-	ts, _ := NewTunnelServer(bind)
+func serverMain(bind string, pub string, secret string) {
+	ts, _ := NewTunnelServerKeyPair(bind, pub, secret)
 	log.Fatal(ts.Run())
 }

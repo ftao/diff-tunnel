@@ -1,8 +1,11 @@
 package main
 
 import (
-	"fmt"
 	"github.com/docopt/docopt-go"
+	zmq "github.com/pebbe/zmq4"
+	"io/ioutil"
+	"log"
+	"os"
 	"strings"
 )
 
@@ -17,6 +20,21 @@ func makeZmqStyleAddr(addr string) string {
 	}
 }
 
+func loadKeyPair(name string) (pub string, secret string, err error) {
+	var data []byte
+	data, err = ioutil.ReadFile(name + ".pub")
+	if err != nil {
+		return
+	}
+	pub = string(data)
+	data, err = ioutil.ReadFile(name + ".key")
+	if err != nil {
+		return
+	}
+	secret = string(data)
+	return
+}
+
 func main() {
 	usage := `diff-tunnel
 
@@ -24,6 +42,7 @@ Usage:
   diff-tunnel client [--http <HTTP_LISTEN>] [--backend <BACKEND>]
   diff-tunnel server [--tunnel <LISTEN>]
   diff-tunnel proxy  [--http <HTTP_LISTEN>]
+  diff-tunnel genkey NAME
   diff-tunnel -h | --help
   diff-tunnel --version
 
@@ -35,19 +54,37 @@ Options:
   --version                  Show version.`
 
 	args, _ := docopt.Parse(usage, nil, true, "diff-tunnel 0.1", false)
-	fmt.Println(args)
 
-	if args["proxy"].(bool) {
+	switch {
+	case args["genkey"].(bool):
+		public, secret, err := zmq.NewCurveKeypair()
+		if err != nil {
+			log.Printf("fail to generate key", err)
+			os.Exit(1)
+		}
+		log.Printf("generate key pari %s.pub, %s.key", args["NAME"].(string), args["NAME"].(string))
+		ioutil.WriteFile(args["NAME"].(string)+".key", []byte(secret), os.ModePerm)
+		ioutil.WriteFile(args["NAME"].(string)+".pub", []byte(public), os.ModePerm)
+	case args["proxy"].(bool):
 		inprocAddr := "inproc://diff-tunnel"
-		go serverMain(inprocAddr)
-		clientMain(args["--http"].(string), inprocAddr)
+		go serverMain(inprocAddr, "", "")
+		clientMain(args["--http"].(string), inprocAddr, "", "", "")
+	case args["client"].(bool):
+		pub, secret, _ := loadKeyPair("client")
+		serverPub, _, _ := loadKeyPair("server")
+		clientMain(
+			args["--http"].(string),
+			makeZmqStyleAddr(args["--backend"].(string)),
+			serverPub,
+			pub,
+			secret,
+		)
+	case args["server"].(bool):
+		pub, secret, _ := loadKeyPair("server")
+		serverMain(
+			makeZmqStyleAddr(args["--tunnel"].(string)),
+			pub,
+			secret,
+		)
 	}
-	if args["client"].(bool) {
-		clientMain(args["--http"].(string),
-			makeZmqStyleAddr(args["--backend"].(string)))
-	}
-	if args["server"].(bool) {
-		serverMain(makeZmqStyleAddr(args["--tunnel"].(string)))
-	}
-
 }
