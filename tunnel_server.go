@@ -1,4 +1,4 @@
-package main
+package dtunnel
 
 import (
 	zmq "github.com/pebbe/zmq4"

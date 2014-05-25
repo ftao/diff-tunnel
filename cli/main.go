@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/docopt/docopt-go"
+	dtunnel "github.com/ftao/diff-tunnel"
 	zmq "github.com/pebbe/zmq4"
 	"io/ioutil"
 	"log"
@@ -33,6 +34,18 @@ func loadKeyPair(name string) (pub string, secret string, err error) {
 	}
 	secret = string(data)
 	return
+}
+
+func serverMain(bind string, pub string, secret string) {
+	ts, _ := dtunnel.NewTunnelServerKeyPair(bind, pub, secret)
+	log.Fatal(ts.Run())
+}
+
+func clientMain(listen string, backend string, serverPub string, pub string, secret string) {
+	tc, _ := dtunnel.NewTunnelClientKeyPair(backend, serverPub, pub, secret)
+	go tc.Run()
+	s := dtunnel.NewHttpProxyServer(tc)
+	log.Fatal(s.ListenAndServe(listen))
 }
 
 func main() {

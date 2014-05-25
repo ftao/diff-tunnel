@@ -30,6 +30,7 @@ lint:
 build:
 	@echo "$(OK_COLOR)==> Buiding$(NO_COLOR)"
 	go build ./...
+	go build -o diff-tunnel ./cli/ 
  
 #all: format lint test build
 all: format test build

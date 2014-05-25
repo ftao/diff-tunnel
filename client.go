@@ -1,4 +1,4 @@
-package main
+package dtunnel
 
 import (
 	"bufio"
@@ -99,9 +99,6 @@ func (s *HttpProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func clientMain(listen string, backend string, serverPub string, pub string, secret string) {
-	tc, _ := NewTunnelClientKeyPair(backend, serverPub, pub, secret)
-	go tc.Run()
-	s := &HttpProxyServer{tc, tc}
-	log.Fatal(s.ListenAndServe(listen))
+func NewHttpProxyServer(tc *TunnelClient) *HttpProxyServer {
+	return &HttpProxyServer{tc, tc}
 }
